@@ -2,14 +2,16 @@ import os
 from dotenv import load_dotenv, find_dotenv
 from pydantic import BaseModel, Field
 from enum import Enum, auto
+import asyncio
 from typing import List, Literal
 from langchain_openai import ChatOpenAI
+from langchain.tools import StructuredTool
 from langchain_deepseek import ChatDeepSeek
 from langgraph.graph import StateGraph, START, END, MessagesState
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import ToolNode, tools_condition
-from tools.agent_tools import tool_read_document, tool_write_document, tool_get_search_info, tool_search_results
+from tools.agent_tools import tool_read_document, tool_write_document, tool_get_search_info, tool_search_results, tool_sync_url_crawler
 
 
 _ = load_dotenv(find_dotenv())
@@ -19,7 +21,10 @@ SERPAPI_API_KEY = os.environ['SERPAPI_API_KEY']
 THREAD_MEMORY = MemorySaver()
 N_AGENTES = 3
 
-available_tools = [tool_read_document, tool_write_document, tool_get_search_info, tool_search_results]
+
+
+
+available_tools = [tool_sync_url_crawler, tool_search_results]
 
 
 def create_dynamic_enum(values):
@@ -28,7 +33,7 @@ def create_dynamic_enum(values):
 
 
 reasoning_model = ChatDeepSeek(model='deepseek-chat')
-model = ChatOpenAI(model='gpt-4o')
+model = ChatOpenAI(model='gpt-4o-mini')
 reasoning_model = ChatOpenAI(model='gpt-4o')
 
 
@@ -57,7 +62,7 @@ class InstructionNode(BaseModel):
 def node_get_instructions(state:ResearchState):
     sys_msg = f"""Eres un research manager encargado de dirigir un trabajo de investigación que elija el usuario. Tu principal objetivo es analizar lo que pide el usuario y 
     hacer un plan y objetivos sobre el trabajo que hay que entregar (un artículo por ejemplo). Devuelve una descripción detallada de como debe ser el entregable que se tiene que realizar y sobre todo una guía paso a paso de las tareas que se deben de ejecutar para llegar a cumplir.
-    Una vez tengas detallado el trabajo que se tiene que entregar, tienes que pensar el equipo con el que vas a contar para realizar esta tarea. Ya cuentas asignado a un agente especializado en buscar información en internet.
+    Una vez tengas detallado el trabajo que se tiene que entregar, tienes que pensar el equipo con el que vas a contar para realizar esta tarea. Entre las personas del equipo debe haber  un agente especializado en buscar información en internet. Esta es una función muy importante que tendrá que estar obligatoriamente entre las instrucciones (buscar información sobre algo en internet).
     Deberás pensar en el resto del equipo con sus roles y funciones. El resto de agentes que tienes que pensar deben de ser {N_AGENTES}"""
 
     llm_with_structured_output = reasoning_model.with_structured_output(InstructionNode)
@@ -87,7 +92,7 @@ def node_manager_next_move(state:ResearchState):
             interacciones_restantes = interacciones_restantes
         )
 
-    llm_with_structured_output = model.with_structured_output(ManagerDecission)
+    llm_with_structured_output = reasoning_model.with_structured_output(ManagerDecission)
     result = llm_with_structured_output.invoke([SystemMessage(sys_msg)] + state['messages'])
     node_message = f"""
                 siguiente: {result.siguiente} \n
@@ -120,7 +125,7 @@ def multiagent_node(state: ResearchState):
             )
 
     llm_with_tools = model.bind_tools(tools=available_tools)
-    result = llm_with_tools.invoke([SystemMessage(sys_message)]+ state['messages'])
+    result = llm_with_tools.invoke([SystemMessage(sys_message)] + state['messages'])
 
     return {'messages': result, 'n_interactions': interactions - 1}
 
@@ -143,7 +148,7 @@ def router(state: ResearchState):
         return 'agent'
     
 def node_closing(state: ResearchState):
-    sys_msg = """Tu función  es devolver el trabajo en el mejor formato posible para que esté listo para publicar"""
+    sys_msg = """Tu función  es devolver el trabajo en el mejor formato posible para que esté listo para publicar. No se trata de hacer un resumen o una conclusión. Se trata de devolver el trabajo hecho en un mejor formato"""
 
     result = model.invoke([SystemMessage(sys_msg)] + state['messages'])
 
@@ -166,15 +171,23 @@ builder.add_edge(START, 'init_values')
 builder.add_edge('init_values', 'get_instructions')
 builder.add_edge('get_instructions', 'manager_move')
 builder.add_conditional_edges('manager_move', router, ['agent', 'Closing'])
+builder.add_edge('agent', 'manager_move')
 builder.add_edge('Closing', END)
 
 
 graph = builder.compile(checkpointer=THREAD_MEMORY)
 
 
+def main():
+    config ={ "configurable": {"thread_id": "2"}}
+    message = "quiero hacer una guía sobre la IA generativa con tutoriales para usuarios con conocimientos de infórmatica básicos para que puedan aprovechar esta tecnología en tareas cotidianas. Debe tener una extension de diez páginas aproximadamente"
+    for event in graph.stream({"messages": message},config=config, stream_mode="values"):
+        event['messages'][-1].pretty_print()
 
 
 
+if __name__ == "__main__":
+    main()
 
 
 
